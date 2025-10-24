@@ -9,7 +9,7 @@ from scraper import (
     scrape_full_data,
     asegurar_contexto,
     sondear_siniestros_asignados,
-    sondear_analisis_liquidacion
+    sondear_siniestros_liquidacion
 )
 from notion_manager import NotionManager
 from dotenv import load_dotenv
@@ -46,7 +46,7 @@ def _run_scraping_by_company(driver, stats, siniestros_list, target_company):
                 )
                 yield progress_message.encode('utf-8')
 
-            for siniestro in sondear_analisis_liquidacion(driver, "BCI"):
+            for siniestro in sondear_siniestros_liquidacion(driver, "BCI"):
                 siniestros_list.append(siniestro)
                 progress_message = (
                     f"Siniestro BCI (Análisis) encontrado: {siniestro.get('NumeroSiniestro')}\n"
@@ -61,7 +61,7 @@ def _run_scraping_by_company(driver, stats, siniestros_list, target_company):
                 )
                 yield progress_message.encode('utf-8')
 
-            for siniestro in sondear_analisis_liquidacion(driver, "ZENIT"):
+            for siniestro in sondear_siniestros_liquidacion(driver, "ZENIT"):
                 siniestros_list.append(siniestro)
                 progress_message = (
                     f"Siniestro ZENIT (Análisis) encontrado: {siniestro.get('NumeroSiniestro')}\n"
