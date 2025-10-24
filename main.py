@@ -405,7 +405,10 @@ def trigger_run():
                 yield "--- ERROR: BCI_USER or BCI_PASS not set\n".encode('utf-8')
                 return
 
-            login_to_bci(driver, user, password)
+            login_success = login_to_bci(driver, user, password)
+            if not login_success:
+                yield "--- ERROR: Login fallido. Deteniendo el proceso completo.\n".encode('utf-8')
+                return
 
             # Guardar checkpoint de login exitoso
             _save_login_checkpoint()
