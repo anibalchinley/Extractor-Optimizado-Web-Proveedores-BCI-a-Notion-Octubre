@@ -1,3 +1,4 @@
+
 import os
 import time
 import json
@@ -7,6 +8,7 @@ import datetime
 import pandas as pd
 import traceback
 import pdfplumber
+import threading
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from selenium import webdriver # Reemplazamos UC por el webdriver estándar
@@ -198,6 +200,53 @@ def take_screenshot(driver, filename="screenshot.png"):
         except Exception as e:
             print(f"DEBUG: Error al tomar captura de pantalla {filename}: {e}", flush=True)
 
+def apply_stealth_with_timeout(driver, timeout_seconds=30):
+    """
+    Aplica los parches de selenium-stealth con un timeout para evitar que se cuelgue.
+
+    Args:
+        driver: Instancia de WebDriver
+        timeout_seconds: Tiempo máximo en segundos para aplicar stealth
+
+    Returns:
+        bool: True si se aplicó correctamente, False si timeout o error
+    """
+    result = {'success': False, 'error': None}
+
+    def stealth_worker():
+        try:
+            print("DEBUG: Iniciando aplicación de stealth patches...", flush=True)
+            stealth(driver,
+                    languages=["es-ES", "es"],
+                    vendor="Google Inc.",
+                    platform="Win32",
+                    webgl_vendor="Intel Inc.",
+                    renderer="Intel Iris OpenGL Engine",
+                    fix_hairline=True,
+                    )
+            print("DEBUG: Stealth patches aplicados exitosamente.", flush=True)
+            result['success'] = True
+        except Exception as e:
+            print(f"DEBUG: Error durante aplicación de stealth: {e}", flush=True)
+            result['error'] = str(e)
+
+    print(f"DEBUG: Aplicando stealth con timeout de {timeout_seconds} segundos...", flush=True)
+    thread = threading.Thread(target=stealth_worker)
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout_seconds)
+
+    if thread.is_alive():
+        print(f"DEBUG: Timeout alcanzado ({timeout_seconds}s) aplicando stealth. Abortando.", flush=True)
+        return False
+
+    if not result['success']:
+        print(f"DEBUG: Fallo en aplicación de stealth: {result['error']}", flush=True)
+        return False
+
+    print("DEBUG: Stealth aplicado correctamente con timeout.", flush=True)
+    return True
+
 def setup_driver():
         """Configura e inicializa el WebDriver estándar de Selenium para Render."""
         print("--- Entrando a setup_driver (MODO ESTÁNDAR DE SELENIUM)...", flush=True)
@@ -233,16 +282,12 @@ def setup_driver():
             print("Esto puede indicar un problema con el chromedriver en el PATH del servidor.", flush=True)
             return None
 
-        print("5. Aplicando parches de sigilo con selenium-stealth...", flush=True)
-        stealth(driver,
-                languages=["es-ES", "es"],
-                vendor="Google Inc.",
-                platform="Win32",
-                webgl_vendor="Intel Inc.",
-                renderer="Intel Iris OpenGL Engine",
-                fix_hairline=True,
-                )
-        print("6. Parches de sigilo aplicados.", flush=True)
+        print("5. Aplicando parches de sigilo con selenium-stealth (con timeout)...", flush=True)
+        if not apply_stealth_with_timeout(driver, timeout_seconds=30):
+            print("ERROR: No se pudieron aplicar los parches de stealth. Continuando sin ellos.", flush=True)
+            # No retornamos None aquí, ya que el driver puede funcionar sin stealth
+        else:
+            print("6. Parches de sigilo aplicados exitosamente.", flush=True)
 
         return driver
 
