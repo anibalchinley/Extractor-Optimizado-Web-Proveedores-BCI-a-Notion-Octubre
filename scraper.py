@@ -4,6 +4,7 @@ import re
 import datetime
 import logging
 import pdfplumber
+import io
 from dotenv import load_dotenv
 from selenium import webdriver # Reemplazamos UC por el webdriver estándar
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -310,74 +311,52 @@ def setup_driver():
         return driver
 
 def login_to_bci(driver, user, password):
-        """Navega a la página de BCI y realiza el login."""
+    """Navega a la página de BCI y realiza el login."""
+    try:
+        logger.info(f"Navegando a: {LOGIN_URL}")
+        driver.get(LOGIN_URL)
+
+        logger.debug("Esperando a que los campos de usuario y contraseña sean visibles.")
+        # Shorter timeout for Render
+        email_input = WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.CSS_SELECTOR, USER_SELECTOR)))
+        email_input.send_keys(user)
+        logger.debug("Usuario ingresado.")
+
+        password_input = driver.find_element(By.CSS_SELECTOR, PASS_SELECTOR)
+        password_input.send_keys(password)
+        logger.debug("Contraseña ingresada. Credenciales completas.")
+
+        logger.info("Haciendo clic en el botón de login...")
+        login_button = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.CSS_SELECTOR, BUTTON_SELECTOR)))
+        login_button.click()
+        logger.debug("Clic en botón de login realizado.")
+
+        logger.info("Esperando redirección a 'busqueda-avanzada'...")
+        # Shorter timeout for Render (within 30s limit)
+        WebDriverWait(driver, 10).until(EC.url_contains('busqueda-avanzada'))
+        logger.info(f"Login exitoso. Nueva URL: {driver.current_url}")
+
+        # Quick verification that we're logged in
         try:
-            logger.info(f"Navegando a: {LOGIN_URL}")
-            driver.get(LOGIN_URL)
-            logger.debug(f"URL actual: {driver.current_url}")
-
-            logger.debug("Esperando a que los campos de usuario y contraseña sean visibles.")
-            email_input = WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.CSS_SELECTOR, USER_SELECTOR)))
-            email_input.send_keys(user)
-            logger.debug("Usuario ingresado.")
-
-            password_input = driver.find_element(By.CSS_SELECTOR, PASS_SELECTOR)
-            password_input.send_keys(password)
-            logger.debug("Contraseña ingresada. Credenciales completas.")
-
-
-            logger.info("Haciendo clic en el botón de login...")
-            login_button = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, BUTTON_SELECTOR)))
-            login_button.click()
-            logger.debug("Clic en botón de login realizado.")
-
-            logger.info("Esperando redirección a 'busqueda-avanzada'...")
-            WebDriverWait(driver, 30).until(EC.url_contains('busqueda-avanzada'))
-            logger.info(f"Login exitoso. Nueva URL: {driver.current_url}")
-
-            # Manejar popup post-login
-            logger.info("Esperando y cerrando popup post-login...")
-            try:
-                # Esperar a que el page loader desaparezca antes de intentar interactuar con popups
-                WebDriverWait(driver, 30).until(
-                    EC.invisibility_of_element_located((By.CSS_SELECTOR, PAGE_LOADER_SELECTOR))
-                )
-                logger.debug("Page loader desaparecido, procediendo con popup.")
-
-                popup_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, ".bs-dynamic-dialog-footer button.bs-btn.bs-btn-primary"))
-                )
-                # Usar JavaScript click para evitar ElementClickInterceptedException
-                driver.execute_script("arguments[0].click();", popup_button)
-                logger.debug("Popup post-login cerrado.")
-            except TimeoutException:
-                logger.warning("No se encontró popup post-login o timeout esperando loader.")
-
-            # Verificar que la sesión esté realmente activa
-            try:
-                if check_login_status(driver):
-                    logger.info("Sesión verificada correctamente.")
-                    # Añadido: Pequeña pausa y manejo de popups post-login para robustez
-                    logger.debug("Pausa post-login y manejo de popups inicial.")
-                    WebDriverWait(driver, 5).until(lambda d: True)  # Reemplaza time.sleep(2)
-                    manejar_posibles_popups(driver)
-                    return True
-                else:
-                    logger.error("No se pudo verificar la sesión.")
-                    return False
-            except Exception as e:
-                logger.error(f"Error al verificar el estado de login: {e}")
-                return False
-
-        except WebDriverException as e:
-            logger.error(f"Error de WebDriver durante el proceso de login: {e}")
-            take_screenshot(driver, "09_login_webdriver_exception.png")
+            WebDriverWait(driver, 5).until(
+                lambda d: d.current_url == BUSQUEDA_AVANZADA_URL and
+                          d.execute_script('return document.readyState') == 'complete'
+            )
+            logger.info("Sesión verificada correctamente.")
+            return True
+        except TimeoutException:
+            logger.error("No se pudo verificar la sesión.")
             return False
-        except Exception as e:
-            logger.error(f"Error inesperado durante el proceso de login: {e}")
-            logger.error(f"Traceback completo del login:\n{traceback.format_exc()}")
-            take_screenshot(driver, "09_login_exception.png")
-            return False
+
+    except TimeoutException as e:
+        logger.error(f"Timeout durante el proceso de login: {e}")
+        return False
+    except WebDriverException as e:
+        logger.error(f"Error de WebDriver durante el proceso de login: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Error inesperado durante el proceso de login: {e}")
+        return False
 
 
 def check_login_status(driver):
