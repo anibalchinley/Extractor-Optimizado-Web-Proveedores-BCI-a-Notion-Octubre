@@ -669,48 +669,145 @@ def asegurar_contexto(driver, compania_objetivo, max_retries=2):
         logger.info(f"Contexto actual es {contexto_actual}. Intentando cambiar a {compania_objetivo.upper()}...")
 
         try:
-            # Paso 1: Encontrar el dropdown arrow trigger
-            dropdown_arrow = WebDriverWait(driver, 15).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "img[src*='icon-ui-nav-flecha-abajo.svg']"))
-            )
-            logger.debug("Dropdown arrow encontrado.")
-
+            # Paso 1: Encontrar el dropdown arrow trigger - Multiple strategies
+            dropdown_arrow = None
+            for attempt in range(1, 4):
+                try:
+                    # Strategy 1: Original selector
+                    try:
+                        dropdown_arrow = WebDriverWait(driver, 10).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, "img[src*='icon-ui-nav-flecha-abajo.svg']"))
+                        )
+                        logger.debug("Dropdown arrow found with strategy 1")
+                        break
+                    except TimeoutException:
+                        # Strategy 2: More flexible selector
+                        try:
+                            dropdown_arrow = WebDriverWait(driver, 10).until(
+                                EC.element_to_be_clickable((By.CSS_SELECTOR, "img[src*='flecha-abajo']"))
+                            )
+                            logger.debug("Dropdown arrow found with strategy 2")
+                            break
+                        except TimeoutException:
+                            # Strategy 3: Look for any dropdown trigger
+                            try:
+                                dropdown_arrow = WebDriverWait(driver, 10).until(
+                                    EC.element_to_be_clickable((By.XPATH, "//img[contains(@src, 'flecha') or contains(@alt, 'menu') or contains(@class, 'dropdown')]"))
+                                )
+                                logger.debug("Dropdown arrow found with strategy 3")
+                                break
+                            except TimeoutException:
+                                logger.warning(f"Dropdown arrow not found in attempt {attempt}")
+                                if attempt < 3:
+                                    time.sleep(2)
+                                    continue
+                                else:
+                                    raise TimeoutException("No se pudo encontrar el dropdown arrow después de múltiples estrategias")
+                except Exception as e:
+                    logger.error(f"Error finding dropdown arrow in attempt {attempt}: {e}")
+                    if attempt == 3:
+                        raise e
+    
             # Paso 2: Hacer clic en el dropdown arrow para abrir el menú de contexto
             driver.execute_script("arguments[0].click();", dropdown_arrow)
             logger.debug("Clic en dropdown arrow realizado.")
-
-            # Paso 3: Esperar a que aparezcan las opciones del menú
-            WebDriverWait(driver, 10).until(
-                lambda d: len(d.find_elements(By.CSS_SELECTOR, "a.bs-selector.grande, a.bs-selector.grande.visited")) > 0
-            )
-            logger.debug("Opciones del menú de contexto cargadas.")
-
-            # Paso 4: Encontrar y seleccionar la opción correcta
+    
+            # Paso 3: Esperar a que aparezcan las opciones del menú - Enhanced waiting
+            menu_appeared = False
+            for wait_attempt in range(1, 4):
+                try:
+                    WebDriverWait(driver, 15).until(
+                        lambda d: len(d.find_elements(By.CSS_SELECTOR, "a.bs-selector.grande, a.bs-selector.grande.visited")) > 0 or
+                                  len(d.find_elements(By.XPATH, "//a[contains(@class, 'selector') and contains(@class, 'grande')]")) > 0 or
+                                  len(d.find_elements(By.XPATH, "//div[contains(@class, 'dropdown-menu')]//a")) > 0
+                    )
+                    menu_appeared = True
+                    logger.debug("Opciones del menú de contexto cargadas.")
+                    break
+                except TimeoutException:
+                    logger.warning(f"Menu options not loaded in wait attempt {wait_attempt}")
+                    if wait_attempt < 3:
+                        time.sleep(2)
+                        # Try clicking dropdown again
+                        try:
+                            driver.execute_script("arguments[0].click();", dropdown_arrow)
+                        except:
+                            pass
+                    else:
+                        raise TimeoutException("Las opciones del menú de contexto no aparecieron después de múltiples intentos")
+    
+            # Paso 4: Encontrar y seleccionar la opción correcta - Enhanced search
             option_found = False
-            # Buscar opciones con las clases especificadas
-            options = driver.find_elements(By.CSS_SELECTOR, "a.bs-selector.grande, a.bs-selector.grande.visited")
-            for option in options:
-                if option.is_displayed() and option.is_enabled():
-                    option_text = option.text.strip()
-                    if texto_opcion_menu.lower() in option_text.lower():
-                        logger.info(f"Opción encontrada: '{option_text}'. Seleccionando.")
-                        driver.execute_script("arguments[0].click();", option)
-                        option_found = True
+            for search_attempt in range(1, 4):
+                try:
+                    # Buscar opciones con las clases especificadas
+                    options = driver.find_elements(By.CSS_SELECTOR, "a.bs-selector.grande, a.bs-selector.grande.visited")
+                    if not options:
+                        # Fallback: buscar en cualquier menú desplegable
+                        options = driver.find_elements(By.XPATH, "//div[contains(@class, 'dropdown-menu')]//a")
+    
+                    for option in options:
+                        if option.is_displayed() and option.is_enabled():
+                            option_text = option.text.strip()
+                            if texto_opcion_menu.lower() in option_text.lower():
+                                logger.info(f"Opción encontrada: '{option_text}'. Seleccionando.")
+                                driver.execute_script("arguments[0].click();", option)
+                                option_found = True
+                                break
+    
+                    if option_found:
                         break
-
+                    else:
+                        logger.warning(f"Opción '{texto_opcion_menu}' no encontrada en búsqueda {search_attempt}")
+                        if search_attempt < 3:
+                            time.sleep(2)
+                            continue
+                except Exception as e:
+                    logger.error(f"Error en búsqueda de opción {search_attempt}: {e}")
+                    if search_attempt < 3:
+                        time.sleep(2)
+                        continue
+                    else:
+                        raise e
+    
             if not option_found:
-                logger.error(f"No se encontró la opción '{texto_opcion_menu}' en el menú.")
+                logger.error(f"No se encontró la opción '{texto_opcion_menu}' en el menú después de múltiples búsquedas.")
                 raise TimeoutException(f"La opción '{texto_opcion_menu}' no fue encontrada en el menú.")
 
-            # Paso 5: Esperar y verificar el cambio
+            # Paso 5: Esperar y verificar el cambio - Enhanced verification
             logger.info("Cambio de contexto solicitado. Esperando carga de página...")
             esperar_pagina_cargada(driver)
             manejar_popup_bienvenida(driver)
 
             logger.info(f"Esperando la confirmación del cambio a {compania_objetivo.upper()}...")
-            WebDriverWait(driver, 20).until(
-                lambda d: detectar_contexto_actual(d) == compania_objetivo.upper()
-            )
+            context_changed = False
+            for verify_attempt in range(1, 4):
+                try:
+                    WebDriverWait(driver, 20).until(
+                        lambda d: detectar_contexto_actual(d) == compania_objetivo.upper()
+                    )
+                    context_changed = True
+                    logger.info(f"Contexto verificado exitosamente en intento {verify_attempt}")
+                    break
+                except TimeoutException:
+                    logger.warning(f"Verificación de contexto fallida en intento {verify_attempt}")
+                    if verify_attempt < 3:
+                        # Try refreshing page state
+                        time.sleep(3)
+                        driver.refresh()
+                        esperar_pagina_cargada(driver)
+                        manejar_popup_bienvenida(driver)
+                    else:
+                        # Final fallback: check URL as secondary verification
+                        current_url = driver.current_url.lower()
+                        if compania_objetivo.upper() == "ZENIT" and "zenit" in current_url:
+                            logger.info("Contexto ZENIT verificado por URL como fallback")
+                            context_changed = True
+                        elif compania_objetivo.upper() == "BCI" and ("bciseguros" in current_url or "busqueda-avanzada" in current_url):
+                            logger.info("Contexto BCI verificado por URL como fallback")
+                            context_changed = True
+                        else:
+                            raise TimeoutException(f"No se pudo verificar el cambio a {compania_objetivo.upper()} después de múltiples intentos")
 
             # Extra wait specifically for BCI context change due to slower loader disappearance
             if compania_objetivo.upper() == "BCI":
@@ -848,30 +945,77 @@ def sondear_siniestros_asignados(driver, compania):
         max_loader_retries = 5
         for loader_attempt in range(1, max_loader_retries + 1):
             try:
-                WebDriverWait(driver, 10 + loader_attempt * 5).until(
-                    EC.invisibility_of_element_located((By.CSS_SELECTOR, "div.bs-page-loader"))
-                )
-                logger.debug(f"Page loader fully disappeared after {loader_attempt} attempts.")
-                break
+                # Multiple loader selectors for robustness
+                loader_selectors = [
+                    "div.bs-page-loader",
+                    "div.loader-container",
+                    ".loader",
+                    "[role='progressbar']",
+                    "div.spinner"
+                ]
+                loader_found = False
+                for selector in loader_selectors:
+                    try:
+                        WebDriverWait(driver, 5).until(
+                            EC.invisibility_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        logger.debug(f"Loader '{selector}' disappeared.")
+                        loader_found = True
+                        break
+                    except TimeoutException:
+                        continue
+
+                if loader_found:
+                    logger.debug(f"Page loader fully disappeared after {loader_attempt} attempts.")
+                    break
+                else:
+                    # If no loaders found, assume page is ready
+                    logger.debug("No loaders detected, assuming page is ready.")
+                    break
+
             except TimeoutException:
                 if loader_attempt == max_loader_retries:
                     logger.warning("Warning: Page loader still visible after all retries. Proceeding anyway.")
                 else:
                     time.sleep(2)
 
-        # Intentar clickear con reintentos y manejo de excepciones
-        max_retries = 3
+        # Intentar clickear con reintentos y manejo de excepciones - Multiple selector strategies
+        max_retries = 5
+        asignados_tab = None
         for attempt in range(1, max_retries + 1):
             try:
-                asignados_tab = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'font-bold') and contains(@class, 'white-space-nowrap') and contains(@class, 'm-0') and contains(@class, 'ng-star-inserted') and contains(text(), 'Asignados')]" )))
-                driver.execute_script("arguments[0].click();", asignados_tab)
-                logger.info(f"Click en pestaña 'Asignados' realizado exitosamente en intento {attempt}.")
-                break
+                # Strategy 1: Original XPath
+                try:
+                    asignados_tab = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'font-bold') and contains(@class, 'white-space-nowrap') and contains(@class, 'm-0') and contains(@class, 'ng-star-inserted') and contains(text(), 'Asignados')]" )))
+                    logger.debug("Found 'Asignados' tab with strategy 1")
+                except TimeoutException:
+                    # Strategy 2: More flexible XPath
+                    try:
+                        asignados_tab = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), 'Asignados')]" )))
+                        logger.debug("Found 'Asignados' tab with strategy 2")
+                    except TimeoutException:
+                        # Strategy 3: Look for any element containing 'Asignados'
+                        try:
+                            asignados_tab = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Asignados')]" )))
+                            logger.debug("Found 'Asignados' tab with strategy 3")
+                        except TimeoutException:
+                            # Strategy 4: Check for tab links
+                            try:
+                                asignados_tab = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, 'asignados') or contains(text(), 'Asignados')]" )))
+                                logger.debug("Found 'Asignados' tab with strategy 4")
+                            except TimeoutException:
+                                logger.warning(f"No 'Asignados' tab found in attempt {attempt}")
+                                continue
+
+                if asignados_tab:
+                    driver.execute_script("arguments[0].click();", asignados_tab)
+                    logger.info(f"Click en pestaña 'Asignados' realizado exitosamente en intento {attempt}.")
+                    break
             except (ElementClickInterceptedException, StaleElementReferenceException) as e:
                 logger.warning(f"Error en intento {attempt} al clickear 'Asignados': {e}")
                 if attempt == max_retries:
                     raise e
-                time.sleep(2)
+                time.sleep(3)
                 # Re-encontrar el elemento después de esperar
                 continue
 
@@ -910,8 +1054,26 @@ def sondear_siniestros_asignados(driver, compania):
                 logger.debug(f"Datos de {len(rows)} filas guardados.")
 
             except TimeoutException:
-                logger.info("No se encontraron más filas de 'Asignados' en esta página. Finalizando recolección.")
-                break
+                logger.warning("Timeout esperando filas de 'Asignados'. Verificando estado de página...")
+                # Check if page is still responsive and we're on the right tab
+                try:
+                    current_url = driver.current_url
+                    if "busqueda-avanzada" not in current_url:
+                        logger.error("Página cambió inesperadamente. Deteniendo recolección.")
+                        break
+                    # Try to re-click the Asignados tab
+                    try:
+                        asignados_tab_retry = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), 'Asignados')]" )))
+                        driver.execute_script("arguments[0].click();", asignados_tab_retry)
+                        logger.info("Re-click en pestaña 'Asignados' realizado.")
+                        esperar_pagina_cargada(driver)
+                        continue
+                    except TimeoutException:
+                        logger.error("No se pudo re-acceder a la pestaña 'Asignados'. Finalizando recolección.")
+                        break
+                except Exception as e:
+                    logger.error(f"Error verificando estado de página: {e}")
+                    break
 
             # Paginación
             try:
