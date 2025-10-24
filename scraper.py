@@ -1,4 +1,3 @@
-
 import os
 import time
 import json
@@ -8,20 +7,62 @@ import datetime
 import pandas as pd
 import traceback
 import pdfplumber
-import threading
+import logging
 from dotenv import load_dotenv
-from bs4 import BeautifulSoup
-from selenium import webdriver # Reemplazamos UC por el webdriver estándar
-from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException, NoSuchElementException
+from selenium.common.exceptions import (
+    TimeoutException,
+    StaleElementReferenceException,
+    NoSuchElementException,
+    ElementClickInterceptedException,
+    WebDriverException
+)
 import base64
-from twocaptcha import TwoCaptcha
 from selenium_stealth import stealth
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('/tmp/scraper.log', mode='a')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Constants
+LOGIN_URL = "https://webproveedores.bciseguros.cl/login"
+BUSQUEDA_AVANZADA_URL = "https://webproveedores.bciseguros.cl/busqueda-avanzada"
+USER_SELECTOR = 'input[formcontrolname="username"]'
+PASS_SELECTOR = 'input[formcontrolname="password"]'
+BUTTON_SELECTOR = 'button.bs-btn.bs-btn-primary.btn-mobile-center.w-100'
+PAGE_LOADER_SELECTOR = "div.loader-container, .loader, [role='progressbar'], div.bs-page-loader"
+
+def check_captcha_presence(driver):
+    """Check if CAPTCHA is present on the page."""
+    try:
+        # Check for reCAPTCHA iframe
+        captcha_iframe = driver.find_elements(By.XPATH, "//iframe[contains(@src, 'recaptcha')]")
+        if captcha_iframe:
+            logger.warning("CAPTCHA detected on the page.")
+            return True
+
+        # Check for reCAPTCHA div
+        captcha_div = driver.find_elements(By.CLASS_NAME, "g-recaptcha")
+        if captcha_div:
+            logger.warning("CAPTCHA div detected on the page.")
+            return True
+
+        return False
+    except Exception as e:
+        logger.error(f"Error checking for CAPTCHA: {e}")
+        return False
 
 def detectar_contexto_actual(driver):
     """
@@ -37,7 +78,7 @@ def detectar_contexto_actual(driver):
     try:
         # Primero esperar a que la página esté completamente cargada
         if not esperar_pagina_cargada(driver, timeout=15):
-            print("Advertencia: La página no se cargó completamente antes de detectar contexto.")
+            logger.warning("La página no se cargó completamente antes de detectar contexto.")
             return "DESCONOCIDO"
 
         # Verificar si estamos dentro de un iframe y cambiar al contexto principal si es necesario
@@ -56,57 +97,57 @@ def detectar_contexto_actual(driver):
         logo_element = None
         for selector in logo_selectors:
             try:
-                print(f"Intentando encontrar logo con: {selector}")
+                logger.debug(f"Intentando encontrar logo con: {selector}")
                 # Espera hasta 10 segundos por logo
                 WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, selector))
                 )
                 logo_element = driver.find_element(By.CSS_SELECTOR, selector)
                 if logo_element.is_displayed():
-                    print(f"Logo encontrado y visible: {selector}")
+                    logger.debug(f"Logo encontrado y visible: {selector}")
                     break
                 else:
-                    print(f"Logo encontrado pero no visible: {selector}")
+                    logger.debug(f"Logo encontrado pero no visible: {selector}")
             except TimeoutException:
-                print(f"Timeout esperando logo: {selector}")
+                logger.debug(f"Timeout esperando logo: {selector}")
                 continue
             except Exception as e:
-                print(f"Error con selector {selector}: {e}")
+                logger.debug(f"Error con selector {selector}: {e}")
                 continue
 
         if not logo_element:
-            print("Error: Ningún logo fue encontrado.")
+            logger.error("Ningún logo fue encontrado.")
             # Intentar inferir contexto desde la URL
             current_url = driver.current_url.lower()
             if "bciseguros" in current_url:
-                print("Contexto inferido como BCI desde la URL (logo no encontrado)")
+                logger.info("Contexto inferido como BCI desde la URL (logo no encontrado)")
                 return "BCI"
             elif "zenit" in current_url:
-                print("Contexto inferido como ZENIT desde la URL (logo no encontrado)")
+                logger.info("Contexto inferido como ZENIT desde la URL (logo no encontrado)")
                 return "ZENIT"
             else:
-                print("No se pudo inferir contexto desde la URL")
+                logger.warning("No se pudo inferir contexto desde la URL")
                 return "DESCONOCIDO"
 
         # Obtener el src del logo
         logo_src = logo_element.get_attribute("src").lower()
-        print(f"Src del logo encontrado: '{logo_src}'")
+        logger.debug(f"Src del logo encontrado: '{logo_src}'")
 
         if "zenit" in logo_src:
-            print("Contexto detectado: ZENIT")
+            logger.info("Contexto detectado: ZENIT")
             return "ZENIT"
         elif "bciseguros" in logo_src:
-            print("Contexto detectado: BCI")
+            logger.info("Contexto detectado: BCI")
             return "BCI"
 
-        print(f"Contexto desconocido en el src del logo: '{logo_src}'")
+        logger.warning(f"Contexto desconocido en el src del logo: '{logo_src}'")
         return "DESCONOCIDO"
 
     except TimeoutException:
-        print("Error de Timeout: No se encontró el logo a tiempo.")
+        logger.error("Timeout: No se encontró el logo a tiempo.")
         return "DESCONOCIDO"
     except Exception as e:
-        print(f"Error inesperado en detectar_contexto_actual: {e}")
+        logger.error(f"Error inesperado en detectar_contexto_actual: {e}")
         return "DESCONOCIDO"
 
 def verificar_contexto_bci(driver):
@@ -156,7 +197,7 @@ def buscar_opcion_contexto(driver, texto_buscar):
 
         return None
     except Exception as e:
-        print(f"Error en buscar_opcion_contexto: {str(e)}")
+        logger.error(f"Error en buscar_opcion_contexto: {str(e)}")
         return None
 
 def buscar_primera_opcion_valida(driver):
@@ -186,7 +227,7 @@ def buscar_primera_opcion_valida(driver):
 
         return None
     except Exception as e:
-        print(f"Error en buscar_primera_opcion_valida: {str(e)}")
+        logger.error(f"Error en buscar_primera_opcion_valida: {str(e)}")
         return None
 
 def take_screenshot(driver, filename="screenshot.png"):
@@ -196,227 +237,121 @@ def take_screenshot(driver, filename="screenshot.png"):
         filepath = os.path.join(screenshot_dir, filename)
         try:
             driver.save_screenshot(filepath)
-            print(f"DEBUG: Captura de pantalla guardada en {filepath}", flush=True)
+            logger.debug(f"Captura de pantalla guardada en {filepath}")
         except Exception as e:
-            print(f"DEBUG: Error al tomar captura de pantalla {filename}: {e}", flush=True)
+            logger.debug(f"Error al tomar captura de pantalla {filename}: {e}")
 
-def apply_stealth_with_timeout(driver, timeout_seconds=30):
-    """
-    Aplica los parches de selenium-stealth con un timeout para evitar que se cuelgue.
-
-    Args:
-        driver: Instancia de WebDriver
-        timeout_seconds: Tiempo máximo en segundos para aplicar stealth
-
-    Returns:
-        bool: True si se aplicó correctamente, False si timeout o error
-    """
-    result = {'success': False, 'error': None}
-
-    def stealth_worker():
-        try:
-            print("DEBUG: Iniciando aplicación de stealth patches...", flush=True)
-            stealth(driver,
-                    languages=["es-ES", "es"],
-                    vendor="Google Inc.",
-                    platform="Win32",
-                    webgl_vendor="Intel Inc.",
-                    renderer="Intel Iris OpenGL Engine",
-                    fix_hairline=True,
-                    )
-            print("DEBUG: Stealth patches aplicados exitosamente.", flush=True)
-            result['success'] = True
-        except Exception as e:
-            print(f"DEBUG: Error durante aplicación de stealth: {e}", flush=True)
-            result['error'] = str(e)
-
-    print(f"DEBUG: Aplicando stealth con timeout de {timeout_seconds} segundos...", flush=True)
-    thread = threading.Thread(target=stealth_worker)
-    thread.daemon = True
-    thread.start()
-    thread.join(timeout_seconds)
-
-    if thread.is_alive():
-        print(f"DEBUG: Timeout alcanzado ({timeout_seconds}s) aplicando stealth. Abortando.", flush=True)
-        return False
-
-    if not result['success']:
-        print(f"DEBUG: Fallo en aplicación de stealth: {result['error']}", flush=True)
-        return False
-
-    print("DEBUG: Stealth aplicado correctamente con timeout.", flush=True)
-    return True
 
 def setup_driver():
-        """Configura e inicializa el WebDriver estándar de Selenium para Render."""
-        print("--- Entrando a setup_driver (MODO ESTÁNDAR DE SELENIUM)...", flush=True)
+    """Configura e inicializa el WebDriver estándar de Selenium para Render."""
+    logger.info("Entrando a setup_driver (MODO ESTÁNDAR DE SELENIUM)")
 
-        options = webdriver.ChromeOptions()
-        print("1. ChromeOptions inicializado.", flush=True)
+    options = webdriver.ChromeOptions()
+    logger.debug("ChromeOptions inicializado.")
 
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        download_dir = "/tmp/downloads"
-        os.makedirs(download_dir, exist_ok=True)
-        print("3. Directorio de descargas configurado en /tmp/downloads.", flush=True)
-        options.add_experimental_option("prefs", {
-            "download.default_directory": download_dir,
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "plugins.always_open_pdf_externally": True
-        })
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1920,1080")
-        print("2. Opciones de Chrome (headless, no-sandbox, etc.) añadidas.", flush=True)
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    download_dir = "/tmp/downloads"
+    os.makedirs(download_dir, exist_ok=True)
+    logger.debug("Directorio de descargas configurado en /tmp/downloads.")
+    options.add_experimental_option("prefs", {
+        "download.default_directory": download_dir,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "plugins.always_open_pdf_externally": True
+    })
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    # Optimized for Render: faster startup
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-plugins")
+    options.add_argument("--blink-settings=imagesEnabled=false")
+    logger.debug("Opciones de Chrome (headless, no-sandbox, etc.) añadidas.")
 
-        # En el entorno de Render, el chromedriver que instala el Dockerfile está en el PATH del sistema.
-        # Selenium lo encuentra automáticamente, por lo que no es necesario un Service object.
-        print("3. Inicializando webdriver.Chrome...", flush=True)
+    # En el entorno de Render, el chromedriver que instala el Dockerfile está en el PATH del sistema.
+    # Selenium lo encuentra automáticamente, por lo que no es necesario un Service object.
+    logger.debug("Inicializando webdriver.Chrome...")
 
-        try:
-            driver = webdriver.Chrome(options=options)
-            print("4. ¡ÉXITO! WebDriver de Selenium (Modo Estándar) inicializado.", flush=True)
-        except Exception as e:
-            print(f"Error al inicializar webdriver.Chrome: {e}", flush=True)
-            print("Esto puede indicar un problema con el chromedriver en el PATH del servidor.", flush=True)
-            return None
+    try:
+        driver = webdriver.Chrome(options=options)
+        logger.info("¡ÉXITO! WebDriver de Selenium (Modo Estándar) inicializado.")
+    except WebDriverException as e:
+        logger.error(f"Error de WebDriver al inicializar webdriver.Chrome: {e}")
+        logger.error("Esto puede indicar un problema con el chromedriver en el PATH del servidor.")
+        return None
+    except Exception as e:
+        logger.error(f"Error inesperado al inicializar webdriver.Chrome: {e}")
+        return None
 
-        print("5. Aplicando parches de sigilo con selenium-stealth (con timeout)...", flush=True)
-        if not apply_stealth_with_timeout(driver, timeout_seconds=30):
-            print("ERROR: No se pudieron aplicar los parches de stealth. Continuando sin ellos.", flush=True)
-            # No retornamos None aquí, ya que el driver puede funcionar sin stealth
-        else:
-            print("6. Parches de sigilo aplicados exitosamente.", flush=True)
+    logger.debug("Aplicando parches de sigilo con selenium-stealth...")
+    stealth(driver,
+            languages=["es-ES", "es"],
+            vendor="Google Inc.",
+            platform="Win32",
+            webgl_vendor="Intel Inc.",
+            renderer="Intel Iris OpenGL Engine",
+            fix_hairline=True,
+            )
+    logger.debug("Parches de sigilo aplicados.")
 
-        return driver
+    return driver
 
-def login_to_bci(driver, user, password, api_key_2captcha):
-        """Navega a la página de BCI, resuelve el reCAPTCHA y realiza el login."""
-        url = "https://webproveedores.bciseguros.cl/login"
-        try:
-            print(f"Navegando a: {url}", flush=True)
-            driver.get(url)
-            print(f"DEBUG: URL actual: {driver.current_url}", flush=True)
+def login_to_bci(driver, user, password):
+    """Navega a la página de BCI y realiza el login."""
+    try:
+        logger.info(f"Navegando a: {LOGIN_URL}")
+        driver.get(LOGIN_URL)
 
-            user_selector = 'input[formcontrolname="username"]'
-            pass_selector = 'input[formcontrolname="password"]'
-            button_selector = 'button.bs-btn.bs-btn-primary.btn-mobile-center.w-100'
-
-            print("Esperando a que los campos de usuario y contraseña sean visibles.", flush=True)
-            email_input = WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.CSS_SELECTOR, user_selector)))
-            email_input.send_keys(user)
-            print("DEBUG: Usuario ingresado.", flush=True)
-
-            password_input = driver.find_element(By.CSS_SELECTOR, pass_selector)
-            password_input.send_keys(password)
-            print("DEBUG: Contraseña ingresada. Credenciales completas.", flush=True)
-
-            print("Iniciando lógica para reCAPTCHA v3...", flush=True)
-            page_source = driver.page_source
-
-            match = re.search(r'https://www.google.com/recaptcha/api.js\?render=([^&]+)', page_source)
-            sitekey = match.group(1) if match else None
-
-            if sitekey:
-                print(f"Sitekey de reCAPTCHA v3 encontrado: {sitekey}", flush=True)
-
-                try:
-                    solver = TwoCaptcha(api_key_2captcha)
-                    print("Enviando reCAPTCHA v3 a 2Captcha... (esto puede tardar)", flush=True)
-                    result = solver.recaptcha(
-                        sitekey=sitekey,
-                        url=url,
-                        version='v3',
-                        action='login',
-                        score=0.7
-                    )
-
-                    if result and result.get('code'):
-                        token = result['code']
-                        print("reCAPTCHA v3 resuelto. Inyectando token.", flush=True)
-                        recaptcha_element_selector = '[name="g-recaptcha-response"]'
-                        js_inyectar_token = f"document.querySelector('{recaptcha_element_selector}').value = arguments[0];"
-
-                        try:
-                            print(f"INTENTO A: Esperando que el elemento '{recaptcha_element_selector}' exista.", flush=True)
-                            WebDriverWait(driver, 10).until(
-                                EC.presence_of_element_located((By.CSS_SELECTOR, recaptcha_element_selector))
-                            )
-                            print("INTENTO A: Éxito. El elemento reCAPTCHA fue encontrado en el DOM.", flush=True)
-                            driver.execute_script(js_inyectar_token, token)
-                            print("Token inyectado en el elemento existente.", flush=True)
-
-                        except TimeoutException:
-                            print("INTENTO A: Falló. El elemento reCAPTCHA no se encontró.", flush=True)
-                            print("INTENTO B: Creando el elemento dinámicamente.", flush=True)
-                            js_crear_e_inyectar = f"""
-                            var newTextarea = document.createElement('textarea');
-                            newTextarea.name = 'g-recaptcha-response';
-                            newTextarea.style.display = 'none';
-                            document.body.appendChild(newTextarea);
-                            document.querySelector('{recaptcha_element_selector}').value = arguments[0];
-                            """
-                            driver.execute_script(js_crear_e_inyectar, token)
-                            print("INTENTO B: Éxito. Elemento creado y token inyectado.", flush=True)
-                    else:
-                        print(f"Error: No se pudo obtener una solución de 2Captcha. Respuesta: {result}", flush=True)
-                        return False
-
-                except Exception as e:
-                    print(f"Error durante el proceso de resolución de CAPTCHA: {e}", flush=True)
-                    return False
-            else:
-                print("No hay reCAPTCHA presente. Continuando con el login.", flush=True)
-
-            print("Haciendo clic en el botón de login...", flush=True)
-            login_button = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, button_selector)))
-            login_button.click()
-            print("DEBUG: Clic en botón de login realizado.", flush=True)
-
-            print("Esperando redirección a 'busqueda-avanzada'...", flush=True)
-            WebDriverWait(driver, 30).until(EC.url_contains('busqueda-avanzada'))
-            print(f"Login exitoso. Nueva URL: {driver.current_url}", flush=True)
-
-            # Manejar popup post-login
-            print("Esperando y cerrando popup post-login...", flush=True)
-            try:
-                # Esperar a que el page loader desaparezca antes de intentar interactuar con popups
-                WebDriverWait(driver, 30).until(
-                    EC.invisibility_of_element_located((By.CSS_SELECTOR, "div.bs-page-loader"))
-                )
-                print("Page loader desaparecido, procediendo con popup.", flush=True)
-
-                popup_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, ".bs-dynamic-dialog-footer button.bs-btn.bs-btn-primary"))
-                )
-                # Usar JavaScript click para evitar ElementClickInterceptedException
-                driver.execute_script("arguments[0].click();", popup_button)
-                print("Popup post-login cerrado.", flush=True)
-            except TimeoutException:
-                print("No se encontró popup post-login o timeout esperando loader.", flush=True)
-
-            # Verificar que la sesión esté realmente activa
-            try:
-                if check_login_status(driver):
-                    print("Sesión verificada correctamente.", flush=True)
-                    # Añadido: Pequeña pausa y manejo de popups post-login para robustez
-                    print("Pausa post-login y manejo de popups inicial.", flush=True)
-                    time.sleep(2)
-                    manejar_posibles_popups(driver)
-                    return True
-                else:
-                    print("No se pudo verificar la sesión.", flush=True)
-                    return False
-            except Exception as e:
-                print(f"Error al verificar el estado de login: {e}", flush=True)
-                return False
-
-        except Exception as e:
-            print(f"Error durante el proceso de login: {e}", flush=True)
-            print(f"Traceback completo del login:\n{traceback.format_exc()}", flush=True)
-            take_screenshot(driver, "09_login_exception.png")
+        # Check for CAPTCHA immediately
+        if check_captcha_presence(driver):
+            logger.error("CAPTCHA detected. Cannot proceed with automated login.")
             return False
+
+        logger.debug("Esperando a que los campos de usuario y contraseña sean visibles.")
+        # Shorter timeout for Render
+        email_input = WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.CSS_SELECTOR, USER_SELECTOR)))
+        email_input.send_keys(user)
+        logger.debug("Usuario ingresado.")
+
+        password_input = driver.find_element(By.CSS_SELECTOR, PASS_SELECTOR)
+        password_input.send_keys(password)
+        logger.debug("Contraseña ingresada. Credenciales completas.")
+
+        logger.info("Haciendo clic en el botón de login...")
+        login_button = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.CSS_SELECTOR, BUTTON_SELECTOR)))
+        login_button.click()
+        logger.debug("Clic en botón de login realizado.")
+
+        logger.info("Esperando redirección a 'busqueda-avanzada'...")
+        # Shorter timeout for Render (within 30s limit)
+        WebDriverWait(driver, 10).until(EC.url_contains('busqueda-avanzada'))
+        logger.info(f"Login exitoso. Nueva URL: {driver.current_url}")
+
+        # Quick verification that we're logged in
+        try:
+            WebDriverWait(driver, 5).until(
+                lambda d: d.current_url == BUSQUEDA_AVANZADA_URL and
+                          d.execute_script('return document.readyState') == 'complete'
+            )
+            logger.info("Sesión verificada correctamente.")
+            return True
+        except TimeoutException:
+            logger.error("No se pudo verificar la sesión.")
+            return False
+
+    except TimeoutException as e:
+        logger.error(f"Timeout durante el proceso de login: {e}")
+        # Check if CAPTCHA appeared after timeout
+        if check_captcha_presence(driver):
+            logger.error("CAPTCHA appeared during login attempt.")
+        return False
+    except WebDriverException as e:
+        logger.error(f"Error de WebDriver durante el proceso de login: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Error inesperado durante el proceso de login: {e}")
+        return False
 
 
 def check_login_status(driver):
@@ -429,21 +364,21 @@ def check_login_status(driver):
     Returns:
         bool: True si la sesión está activa, False en caso contrario
     """
-    print("\n--- Verificando estado de login ---", flush=True)
+    logger.info("Verificando estado de login")
     max_retries = 2
     for attempt in range(1, max_retries + 1):
         try:
             # Log current URL and page title for diagnostics
             current_url = driver.current_url
             page_title = driver.title
-            print(f"DEBUG: Current URL: {current_url}", flush=True)
-            print(f"DEBUG: Page title: {page_title}", flush=True)
+            logger.debug(f"Current URL: {current_url}")
+            logger.debug(f"Page title: {page_title}")
 
             # Ensure page is fully loaded
             WebDriverWait(driver, 10).until(
                 lambda d: d.execute_script('return document.readyState') == 'complete'
             )
-            print(f"DEBUG: Document readyState: complete", flush=True)
+            logger.debug("Document readyState: complete")
 
             # Dismiss any overlays or popups that might hide elements
             overlays = driver.find_elements(By.CSS_SELECTOR, ".cdk-overlay-backdrop, .modal-backdrop, .mat-dialog-backdrop, .bs-overlay-backdrop")
@@ -451,7 +386,7 @@ def check_login_status(driver):
                 if overlay.is_displayed():
                     try:
                         driver.execute_script("arguments[0].click();", overlay)
-                        print("DEBUG: Overlay dismissed.", flush=True)
+                        logger.debug("Overlay dismissed.")
                         time.sleep(1)
                     except:
                         pass
@@ -459,36 +394,36 @@ def check_login_status(driver):
             # Check if URL is the expected post-login page and page is loaded
             expected_url = "https://webproveedores.bciseguros.cl/busqueda-avanzada"
             if driver.current_url == expected_url and driver.execute_script('return document.readyState') == 'complete':
-                print("URL correcta y página cargada. Sesión activa.", flush=True)
+                logger.info("URL correcta y página cargada. Sesión activa.")
                 return True
             else:
-                print(f"DEBUG: URL actual: {driver.current_url}, expected: {expected_url}", flush=True)
-                print(f"DEBUG: Document readyState: {driver.execute_script('return document.readyState')}", flush=True)
+                logger.debug(f"URL actual: {driver.current_url}, expected: {expected_url}")
+                logger.debug(f"Document readyState: {driver.execute_script('return document.readyState')}")
                 return False
         except TimeoutException:
-            print(f"Elemento 'Calendario' no encontrado en intento {attempt}. Intentando elementos alternativos.", flush=True)
+            logger.warning(f"Elemento 'Calendario' no encontrado en intento {attempt}. Intentando elementos alternativos.")
             # Try alternative element checks
             try:
                 WebDriverWait(driver, 10).until(
                     EC.visibility_of_element_located((By.XPATH, "//a[contains(., 'Siniestros')]" ))
                 )
-                print("Elemento alternativo 'Siniestros' encontrado y visible. Sesión activa.", flush=True)
+                logger.info("Elemento alternativo 'Siniestros' encontrado y visible. Sesión activa.")
                 return True
             except TimeoutException:
-                print("Elementos alternativos tampoco encontrados.", flush=True)
+                logger.warning("Elementos alternativos tampoco encontrados.")
             if attempt < max_retries:
-                print("Refrescando página y reintentando...", flush=True)
+                logger.info("Refrescando página y reintentando...")
                 driver.refresh()
                 time.sleep(3)
             else:
                 # Additional diagnostic: check if we're on the expected page
                 if "busqueda-avanzada" not in current_url:
-                    print("DEBUG: Not on expected post-login page (busqueda-avanzada not in URL)", flush=True)
+                    logger.debug("Not on expected post-login page (busqueda-avanzada not in URL)")
                 return False
         except Exception as e:
-            print(f"Error al verificar el estado de login en intento {attempt}: {e}", flush=True)
+            logger.error(f"Error al verificar el estado de login en intento {attempt}: {e}")
             if attempt < max_retries:
-                print("Refrescando página y reintentando...", flush=True)
+                logger.info("Refrescando página y reintentando...")
                 driver.refresh()
                 time.sleep(3)
             else:
@@ -500,23 +435,23 @@ def esperar_pagina_cargada(driver, timeout=30):
     """
     Espera a que la página se cargue completamente y que los loaders desaparezcan.
     """
-    print("--- Esperando carga completa de la página y desaparición de loaders ---", flush=True)
+    logger.info("Esperando carga completa de la página y desaparición de loaders")
     try:
         # 1. Esperar a que el estado del documento sea 'complete'
         WebDriverWait(driver, timeout).until(
             lambda d: d.execute_script('return document.readyState') == 'complete'
         )
-        print("Documento cargado.", flush=True)
+        logger.debug("Documento cargado.")
 
         # 2. Esperar a que cualquier loader desaparezca
         loader_selector = "div.loader-container, .loader, [role='progressbar'], div.bs-page-loader"
         WebDriverWait(driver, timeout).until(
             EC.invisibility_of_element_located((By.CSS_SELECTOR, loader_selector))
         )
-        print("Loaders desaparecidos. La página está lista.", flush=True)
+        logger.debug("Loaders desaparecidos. La página está lista.")
         return True
     except TimeoutException:
-        print("Timeout esperando la carga de la página o la desaparición de los loaders.", flush=True)
+        logger.warning("Timeout esperando la carga de la página o la desaparición de los loaders.")
         take_screenshot(driver, "error_carga_pagina.png")
         return False
 
@@ -531,7 +466,7 @@ def manejar_popup_bienvenida(driver, timeout=30):
     Returns:
         bool: True si se manejó correctamente, False en caso contrario
     """
-    print("\n--- Buscando pop-up de bienvenida ---", flush=True)
+    logger.info("Buscando pop-up de bienvenida")
 
     try:
         # 1. Esperar a que la página y los loaders estén listos
@@ -549,19 +484,19 @@ def manejar_popup_bienvenida(driver, timeout=30):
         button_found = False
         for selector in button_selectors:
             try:
-                print(f"Intentando con selector: {selector}", flush=True)
+                logger.debug(f"Intentando con selector: {selector}")
                 accept_button = WebDriverWait(driver, 5).until(
                     EC.element_to_be_clickable((By.XPATH, selector))
                 )
                 driver.execute_script("arguments[0].click();", accept_button)
-                print("Botón de aceptar clickeado con éxito.", flush=True)
+                logger.info("Botón de aceptar clickeado con éxito.")
                 button_found = True
                 break
             except Exception:
-                print(f"No se pudo interactuar con el botón usando {selector}", flush=True)
+                logger.debug(f"No se pudo interactuar con el botón usando {selector}")
 
         if not button_found:
-            print("No se encontró ningún botón de aceptar visible y clickeable.", flush=True)
+            logger.warning("No se encontró ningún botón de aceptar visible y clickeable.")
             return False
 
         # 3. Esperar a que desaparezcan los backdrops
@@ -576,16 +511,16 @@ def manejar_popup_bienvenida(driver, timeout=30):
                 WebDriverWait(driver, 10).until(
                     EC.invisibility_of_element_located((By.CSS_SELECTOR, selector))
                 )
-                print(f"Backdrop '{selector}' desaparecido.", flush=True)
+                logger.debug(f"Backdrop '{selector}' desaparecido.")
             except:
-                print(f"No se encontró el backdrop '{selector}' o ya desapareció.", flush=True)
+                logger.debug(f"No se encontró el backdrop '{selector}' o ya desapareció.")
 
-        print("Toda la interfaz está lista para interactuar.", flush=True)
+        logger.info("Toda la interfaz está lista para interactuar.")
         return True
 
     except Exception as e:
         error_msg = f"Error inesperado en manejar_popup_bienvenida: {str(e)[:200]}"
-        print(error_msg, flush=True)
+        logger.error(error_msg)
         take_screenshot(driver, "error_popup_bienvenida.png")
         raise Exception(f"Fallo al manejar el pop-up de bienvenida: {str(e)[:200]}")
 
@@ -602,15 +537,15 @@ def manejar_posibles_popups(driver):
             WebDriverWait(driver, 30).until(
                 EC.invisibility_of_element_located((By.CSS_SELECTOR, "div.bs-page-loader"))
             )
-            print("Page loader desaparecido antes de manejar popups.", flush=True)
+            logger.debug("Page loader desaparecido antes de manejar popups.")
         except TimeoutException:
-            print("Timeout esperando que el page loader desaparezca.", flush=True)
+            logger.warning("Timeout esperando que el page loader desaparezca.")
 
         # Primero intentar manejar el popup de bienvenida estándar
         try:
             manejar_popup_bienvenida(driver)
         except Exception as e:
-            print(f"No se pudo manejar el popup de bienvenida: {str(e)[:200]}", flush=True)
+            logger.warning(f"No se pudo manejar el popup de bienvenida: {str(e)[:200]}")
 
         # Esperar un momento para que cualquier popup se cargue completamente
         time.sleep(2)
@@ -630,18 +565,18 @@ def manejar_posibles_popups(driver):
                             EC.invisibility_of_element_located((By.CSS_SELECTOR, "div.bs-page-loader"))
                         )
                         driver.execute_script("arguments[0].click();", boton)
-                        print("Botón de cierre de diálogo encontrado y clickeado.", flush=True)
+                        logger.info("Botón de cierre de diálogo encontrado y clickeado.")
                         time.sleep(1)  # Esperar a que se cierre la animación
                         # Verificar que el botón ya no esté visible
                         if not boton.is_displayed():
-                            print("Verificación: Botón de cierre ya no visible.", flush=True)
+                            logger.debug("Verificación: Botón de cierre ya no visible.")
                         else:
-                            print("Advertencia: Botón de cierre aún visible después del clic.", flush=True)
+                            logger.warning("Advertencia: Botón de cierre aún visible después del clic.")
                 except:
                     continue
 
         except Exception as e:
-            print(f"Error al intentar cerrar diálogos: {str(e)[:200]}", flush=True)
+            logger.warning(f"Error al intentar cerrar diálogos: {str(e)[:200]}")
 
         # Verificar si hay algún overlay o backdrop que bloquee la interacción
         try:
@@ -655,40 +590,40 @@ def manejar_posibles_popups(driver):
                         )
                         # Intentar hacer clic en una esquina del backdrop para cerrarlo
                         driver.execute_script("arguments[0].click();", backdrop)
-                        print("Backdrop encontrado y clickeado.", flush=True)
+                        logger.info("Backdrop encontrado y clickeado.")
                         time.sleep(1)
                         # Verificar que el backdrop ya no esté visible
                         if not backdrop.is_displayed():
-                            print("Verificación: Backdrop ya no visible.", flush=True)
+                            logger.debug("Verificación: Backdrop ya no visible.")
                         else:
-                            print("Advertencia: Backdrop aún visible después del clic.", flush=True)
+                            logger.warning("Advertencia: Backdrop aún visible después del clic.")
                 except:
                     continue
         except Exception as e:
-            print(f"Error al manejar backdrops: {str(e)[:200]}", flush=True)
+            logger.warning(f"Error al manejar backdrops: {str(e)[:200]}")
 
         # Verificación final: Asegurarse de que no queden elementos de popup visibles
         try:
             remaining_popups = driver.find_elements(By.CSS_SELECTOR, ".cdk-overlay-container .cdk-overlay-pane, .modal.show, .mat-dialog-container")
             if remaining_popups:
-                print(f"Advertencia: Aún hay {len(remaining_popups)} elementos de popup visibles.", flush=True)
+                logger.warning(f"Aún hay {len(remaining_popups)} elementos de popup visibles.")
                 for popup in remaining_popups:
                     try:
                         # Intentar cerrar con Escape
                         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
                         time.sleep(1)
                         if not popup.is_displayed():
-                            print("Verificación: Popup cerrado con Escape.", flush=True)
+                            logger.debug("Verificación: Popup cerrado con Escape.")
                             break
                     except:
                         continue
             else:
-                print("Verificación: No se detectan popups visibles.", flush=True)
+                logger.debug("Verificación: No se detectan popups visibles.")
         except Exception as e:
-            print(f"Error en verificación final de popups: {str(e)[:200]}", flush=True)
+            logger.warning(f"Error en verificación final de popups: {str(e)[:200]}")
 
     except Exception as e:
-        print(f"Error inesperado en manejar_posibles_popups: {str(e)[:200]}", flush=True)
+        logger.error(f"Error inesperado en manejar_posibles_popups: {str(e)[:200]}")
         take_screenshot(driver, "error_manejo_popups.png")
 
     return True
@@ -707,7 +642,7 @@ def asegurar_contexto(driver, compania_objetivo, max_retries=2):
     Returns:
         bool: True si el contexto es o se cambió al objetivo, False en caso contrario.
     """
-    print(f"\n--- Asegurando contexto {compania_objetivo.upper()} (v9.8) ---", flush=True)
+    logger.info(f"Asegurando contexto {compania_objetivo.upper()} (v9.8)")
 
     opciones_menu = {
         "BCI": "BCI Seguros",
@@ -715,40 +650,40 @@ def asegurar_contexto(driver, compania_objetivo, max_retries=2):
     }
     texto_opcion_menu = opciones_menu.get(compania_objetivo.upper())
     if not texto_opcion_menu:
-        print(f"Error: Compañía objetivo '{compania_objetivo}' no es válida.", flush=True)
+        logger.error(f"Compañía objetivo '{compania_objetivo}' no es válida.")
         return False
 
     for attempt in range(1, max_retries + 1):
-        print(f"Intento {attempt}/{max_retries}...", flush=True)
+        logger.debug(f"Intento {attempt}/{max_retries}...")
 
         contexto_actual = detectar_contexto_actual(driver)
 
         if contexto_actual == compania_objetivo.upper():
-            print(f"Éxito: El contexto actual ya es {compania_objetivo.upper()}.")
+            logger.info(f"Éxito: El contexto actual ya es {compania_objetivo.upper()}.")
             return True
 
         if contexto_actual == "DESCONOCIDO":
-            print("Advertencia: No se pudo determinar el contexto actual. Asumiendo BCI por defecto.", flush=True)
+            logger.warning("No se pudo determinar el contexto actual. Asumiendo BCI por defecto.")
             contexto_actual = "BCI"
 
-        print(f"Contexto actual es {contexto_actual}. Intentando cambiar a {compania_objetivo.upper()}...")
+        logger.info(f"Contexto actual es {contexto_actual}. Intentando cambiar a {compania_objetivo.upper()}...")
 
         try:
             # Paso 1: Encontrar el dropdown arrow trigger
             dropdown_arrow = WebDriverWait(driver, 15).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, "img[src*='icon-ui-nav-flecha-abajo.svg']"))
             )
-            print("Dropdown arrow encontrado.")
+            logger.debug("Dropdown arrow encontrado.")
 
             # Paso 2: Hacer clic en el dropdown arrow para abrir el menú de contexto
             driver.execute_script("arguments[0].click();", dropdown_arrow)
-            print("Clic en dropdown arrow realizado.")
+            logger.debug("Clic en dropdown arrow realizado.")
 
             # Paso 3: Esperar a que aparezcan las opciones del menú
             WebDriverWait(driver, 10).until(
                 lambda d: len(d.find_elements(By.CSS_SELECTOR, "a.bs-selector.grande, a.bs-selector.grande.visited")) > 0
             )
-            print("Opciones del menú de contexto cargadas.")
+            logger.debug("Opciones del menú de contexto cargadas.")
 
             # Paso 4: Encontrar y seleccionar la opción correcta
             option_found = False
@@ -758,59 +693,59 @@ def asegurar_contexto(driver, compania_objetivo, max_retries=2):
                 if option.is_displayed() and option.is_enabled():
                     option_text = option.text.strip()
                     if texto_opcion_menu.lower() in option_text.lower():
-                        print(f"Opción encontrada: '{option_text}'. Seleccionando.")
+                        logger.info(f"Opción encontrada: '{option_text}'. Seleccionando.")
                         driver.execute_script("arguments[0].click();", option)
                         option_found = True
                         break
 
             if not option_found:
-                print(f"Error: No se encontró la opción '{texto_opcion_menu}' en el menú.")
+                logger.error(f"No se encontró la opción '{texto_opcion_menu}' en el menú.")
                 raise TimeoutException(f"La opción '{texto_opcion_menu}' no fue encontrada en el menú.")
 
             # Paso 5: Esperar y verificar el cambio
-            print("Cambio de contexto solicitado. Esperando carga de página...")
+            logger.info("Cambio de contexto solicitado. Esperando carga de página...")
             esperar_pagina_cargada(driver)
             manejar_popup_bienvenida(driver)
 
-            print(f"Esperando la confirmación del cambio a {compania_objetivo.upper()}...")
+            logger.info(f"Esperando la confirmación del cambio a {compania_objetivo.upper()}...")
             WebDriverWait(driver, 20).until(
                 lambda d: detectar_contexto_actual(d) == compania_objetivo.upper()
             )
 
             # Extra wait specifically for BCI context change due to slower loader disappearance
             if compania_objetivo.upper() == "BCI":
-                print("Extra wait for BCI context change to ensure page loader fully disappears...")
+                logger.info("Extra wait for BCI context change to ensure page loader fully disappears...")
                 max_retries = 5
                 for attempt in range(1, max_retries + 1):
                     try:
                         WebDriverWait(driver, 10 + attempt * 5).until(
                             EC.invisibility_of_element_located((By.CSS_SELECTOR, "div.bs-page-loader"))
                         )
-                        print(f"Page loader fully disappeared for BCI after {attempt} attempts.")
+                        logger.debug(f"Page loader fully disappeared for BCI after {attempt} attempts.")
                         break
                     except TimeoutException:
                         if attempt == max_retries:
-                            print("Warning: Page loader still visible after extra waits for BCI.")
+                            logger.warning("Warning: Page loader still visible after extra waits for BCI.")
                         else:
                             time.sleep(2)
 
-            print(f"Éxito: El contexto se cambió a {compania_objetivo.upper()} correctamente.")
+            logger.info(f"Éxito: El contexto se cambió a {compania_objetivo.upper()} correctamente.")
             return True
 
         except TimeoutException as e:
-            print(f"Error de Timeout en el intento {attempt}: {e}")
+            logger.error(f"Error de Timeout en el intento {attempt}: {e}")
             take_screenshot(driver, f"contexto_timeout_attempt_{attempt}.png")
             if attempt == max_retries:
-                print("Se agotaron los reintentos para cambiar de contexto.")
+                logger.error("Se agotaron los reintentos para cambiar de contexto.")
                 traceback.print_exc()
                 return False
             time.sleep(3)
 
         except Exception as e:
-            print(f"Error inesperado en el intento {attempt}: {e}")
+            logger.error(f"Error inesperado en el intento {attempt}: {e}")
             take_screenshot(driver, f"contexto_error_inesperado_attempt_{attempt}.png")
             if attempt == max_retries:
-                print("Se agotaron los reintentos debido a errores inesperados.")
+                logger.error("Se agotaron los reintentos debido a errores inesperados.")
                 traceback.print_exc()
                 return False
             time.sleep(3)
@@ -823,7 +758,7 @@ def extraer_datos_pdf(driver):
     Encuentra el enlace 'VER DENUNCIO', abre el PDF en una nueva pestaña,
     extrae el 'Relato', 'VIN' y 'Número de Asegurado', y luego cierra la pestaña.
     """
-    print("--- Iniciando extracción de PDF ---", flush=True)
+    logger.info("Iniciando extracción de PDF")
     pdf_data = {"Relato": None, "VIN": None, "NumeroAsegurado": None}
     original_window = driver.current_window_handle
 
@@ -831,7 +766,7 @@ def extraer_datos_pdf(driver):
         ver_denuncio_link = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, "//a[contains(., 'VER DENUNCIO')]" ))
         )
-        print("Enlace 'VER DENUNCIO' encontrado y clickeado.", flush=True)
+        logger.info("Enlace 'VER DENUNCIO' encontrado y clickeado.")
         ver_denuncio_link.click()
 
         WebDriverWait(driver, 10).until(EC.number_of_windows_to_be(2))
@@ -839,7 +774,7 @@ def extraer_datos_pdf(driver):
             if window_handle != original_window:
                 driver.switch_to.window(window_handle)
                 break
-        print(f"Cambiado a la nueva pestaña del PDF: {driver.current_url}", flush=True)
+        logger.debug(f"Cambiado a la nueva pestaña del PDF: {driver.current_url}")
 
         js_script = """
             var url = window.location.href;
@@ -856,7 +791,7 @@ def extraer_datos_pdf(driver):
         data_url = driver.execute_script(js_script)
         header, encoded = data_url.split(",", 1)
         pdf_bytes = base64.b64decode(encoded)
-        print("Contenido del PDF descargado y decodificado.", flush=True)
+        logger.debug("Contenido del PDF descargado y decodificado.")
 
         full_text = ""
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -881,20 +816,20 @@ def extraer_datos_pdf(driver):
         if asegurado_match:
             pdf_data["NumeroAsegurado"] = asegurado_match.group(1).strip()
 
-        print(f"Datos extraídos del PDF: {pdf_data}", flush=True)
+        logger.debug(f"Datos extraídos del PDF: {pdf_data}")
 
     except TimeoutException:
-        print("WARN: No se encontró el enlace 'VER DENUNCIO' o la pestaña del PDF no apareció.", flush=True)
+        logger.warning("No se encontró el enlace 'VER DENUNCIO' o la pestaña del PDF no apareció.")
         take_screenshot(driver, "pdf_link_no_encontrado.png")
     except Exception as e:
-        print(f"ERROR: Fallo inesperado durante la extracción del PDF: {e}", flush=True)
+        logger.error(f"Fallo inesperado durante la extracción del PDF: {e}")
         traceback.print_exc()
         take_screenshot(driver, "pdf_extraccion_error.png")
     finally:
         if len(driver.window_handles) > 1:
             driver.close()
             driver.switch_to.window(original_window)
-            print("Pestaña del PDF cerrada. Volviendo a la pestaña original.", flush=True)
+            logger.debug("Pestaña del PDF cerrada. Volviendo a la pestaña original.")
     return pdf_data
 
 def sondear_siniestros_asignados(driver, compania):
@@ -902,25 +837,25 @@ def sondear_siniestros_asignados(driver, compania):
     Orquesta el proceso de scraping en la pestaña 'Asignados'.
     v4.5: Añade el parámetro compania para etiquetar los datos.
     """
-    print(f"\n--- Iniciando sondeo de Siniestros Asignados para {compania.upper()} ---", flush=True)
+    logger.info(f"Iniciando sondeo de Siniestros Asignados para {compania.upper()}")
 
     try:
         # Las pestañas están directamente accesibles, no es necesario navegar a "Siniestros" y "Gestión de siniestros"
-        print("Navegando a la pestaña 'Asignados'", flush=True)
+        logger.info("Navegando a la pestaña 'Asignados'")
 
         # Enhanced page loader waiting with retry loop and increasing delays
-        print("Waiting for page loader to fully disappear before navigating to 'Asignados'...")
+        logger.info("Waiting for page loader to fully disappear before navigating to 'Asignados'...")
         max_loader_retries = 5
         for loader_attempt in range(1, max_loader_retries + 1):
             try:
                 WebDriverWait(driver, 10 + loader_attempt * 5).until(
                     EC.invisibility_of_element_located((By.CSS_SELECTOR, "div.bs-page-loader"))
                 )
-                print(f"Page loader fully disappeared after {loader_attempt} attempts.")
+                logger.debug(f"Page loader fully disappeared after {loader_attempt} attempts.")
                 break
             except TimeoutException:
                 if loader_attempt == max_loader_retries:
-                    print("Warning: Page loader still visible after all retries. Proceeding anyway.")
+                    logger.warning("Warning: Page loader still visible after all retries. Proceeding anyway.")
                 else:
                     time.sleep(2)
 
@@ -930,10 +865,10 @@ def sondear_siniestros_asignados(driver, compania):
             try:
                 asignados_tab = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'font-bold') and contains(@class, 'white-space-nowrap') and contains(@class, 'm-0') and contains(@class, 'ng-star-inserted') and contains(text(), 'Asignados')]" )))
                 driver.execute_script("arguments[0].click();", asignados_tab)
-                print(f"Click en pestaña 'Asignados' realizado exitosamente en intento {attempt}.", flush=True)
+                logger.info(f"Click en pestaña 'Asignados' realizado exitosamente en intento {attempt}.")
                 break
             except (ElementClickInterceptedException, StaleElementReferenceException) as e:
-                print(f"Error en intento {attempt} al clickear 'Asignados': {e}", flush=True)
+                logger.warning(f"Error en intento {attempt} al clickear 'Asignados': {e}")
                 if attempt == max_retries:
                     raise e
                 time.sleep(2)
@@ -944,12 +879,12 @@ def sondear_siniestros_asignados(driver, compania):
 
         page_num = 1
         while True:
-            print(f"\nRecolectando datos de tabla en página {page_num}...", flush=True)
+            logger.info(f"Recolectando datos de tabla en página {page_num}...")
             row_selector = "//tr[contains(@class, 'ng-star-inserted')]"
             try:
                 WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, row_selector)))
                 rows = driver.find_elements(By.XPATH, row_selector)
-                print(f"Encontradas {len(rows)} filas en la página {page_num}.", flush=True)
+                logger.debug(f"Encontradas {len(rows)} filas en la página {page_num}.")
 
                 # Extraer todos los datos de cada fila usando índices
                 for row in rows:
@@ -972,10 +907,10 @@ def sondear_siniestros_asignados(driver, compania):
                         }
                         yield row_data
 
-                print(f"Datos de {len(rows)} filas guardados.", flush=True)
+                logger.debug(f"Datos de {len(rows)} filas guardados.")
 
             except TimeoutException:
-                print("No se encontraron más filas de 'Asignados' en esta página. Finalizando recolección.", flush=True)
+                logger.info("No se encontraron más filas de 'Asignados' en esta página. Finalizando recolección.")
                 break
 
             # Paginación
@@ -988,7 +923,7 @@ def sondear_siniestros_asignados(driver, compania):
                         if len(cells) > 1:
                             first_row_id_before_pagination = cells[1].text  # NumeroSiniestro is at index 1
                     except NoSuchElementException:
-                        print("WARN: Could not get first row ID for pagination check.", flush=True)
+                        logger.warning("Could not get first row ID for pagination check.")
 
                 next_button_selector = "button.p-paginator-next.p-paginator-element.p-link:not([disabled])"
                 next_button = driver.find_element(By.CSS_SELECTOR, next_button_selector)
@@ -1008,18 +943,18 @@ def sondear_siniestros_asignados(driver, compania):
                     if len(cells_after) > 1:
                         first_row_id_after_pagination = cells_after[1].text
                         if first_row_id_before_pagination == first_row_id_after_pagination:
-                            print("Detectado bucle de paginación: La primera fila no cambió. Fin de la recolección.", flush=True)
+                            logger.info("Detectado bucle de paginación: La primera fila no cambió. Fin de la recolección.")
                             break # Break if we are stuck on the same page content
                 elif not rows_after_pagination: # If no rows are found on the new page, it's the end
-                    print("No se encontraron filas en la nueva página. Fin de la recolección.", flush=True)
+                    logger.info("No se encontraron filas en la nueva página. Fin de la recolección.")
                     break
 
             except (NoSuchElementException, TimeoutException):
-                print("No hay más páginas o el botón de siguiente está deshabilitado. Fin de la recolección.", flush=True)
+                logger.info("No hay más páginas o el botón de siguiente está deshabilitado. Fin de la recolección.")
                 break
 
     except Exception as e:
-        print(f"Error crítico durante la recolección de la tabla: {e}", flush=True)
+        logger.error(f"Error crítico durante la recolección de la tabla: {e}")
         traceback.print_exc()
         take_screenshot(driver, "error_critico_recoleccion_tabla.png")
 
@@ -1027,7 +962,7 @@ def sondear_siniestros_liquidacion(driver, compania):
     """
     Orquesta el proceso de descarga y procesamiento de Excel para Análisis de Liquidación.
     """
-    print(f"\n--- Iniciando sondeo de Siniestros Liquidación para {compania.upper()} ---", flush=True)
+    logger.info(f"Iniciando sondeo de Siniestros Liquidación para {compania.upper()}")
 
     # Verificar estado actual antes de navegación
     current_url = driver.current_url
@@ -1040,71 +975,57 @@ def sondear_siniestros_liquidacion(driver, compania):
             submenu_container = driver.find_element(By.CSS_SELECTOR, "div#item-1.show")
             if submenu_container.is_displayed():
                 submenu_visible = True
-                # print("DEBUG: Submenu 'div#item-1.show' ya está visible.", flush=True)
         except NoSuchElementException:
             pass
-            # print("DEBUG: Submenu 'div#item-1.show' no encontrado.", flush=True)
 
         # DEBUG: Inspeccionar pestañas disponibles en el submenu
         if submenu_container and submenu_visible:
             try:
                 tabs = submenu_container.find_elements(By.TAG_NAME, "a")
-                # print("DEBUG: Pestañas disponibles en el submenu:", flush=True)
                 for tab in tabs:
                     pass
-                    # print(f"  - Texto: '{tab.text}' | Visible: {tab.is_displayed()} | Enabled: {tab.is_enabled()}", flush=True)
             except Exception as e:
                 pass
-                # print(f"DEBUG: Error al inspeccionar pestañas: {e}", flush=True)
 
         # DEBUG: Inspeccionar todas las pestañas con data-toggle="tab" en toda la página
         try:
             all_tabs = driver.find_elements(By.XPATH, "//a[@data-toggle='tab']")
-            # print("DEBUG: Pestañas con data-toggle='tab' en toda la página:", flush=True)
             for tab in all_tabs:
                 text = tab.text.strip()
                 visible = tab.is_displayed()
                 enabled = tab.is_enabled()
                 data_toggle = tab.get_attribute("data-toggle")
-                # print(f"  - Texto: '{text}' | data-toggle: '{data_toggle}' | Visible: {visible} | Enabled: {enabled}", flush=True)
         except Exception as e:
             pass
-            # print(f"DEBUG: Error al inspeccionar pestañas data-toggle: {e}", flush=True)
 
         # DEBUG: Verificar elementos con data-toggle u otros atributos relacionados con descarga
-        # print("DEBUG: Inspeccionar elementos con data-toggle o atributos de descarga...", flush=True)
         try:
             elements_with_data_toggle = driver.find_elements(By.XPATH, "//*[@data-toggle]")
-            # print(f"DEBUG: Encontrados {len(elements_with_data_toggle)} elementos con data-toggle:", flush=True)
             for i, elem in enumerate(elements_with_data_toggle):
                 tag = elem.tag_name
                 data_toggle = elem.get_attribute("data-toggle")
                 text = elem.text.strip()
                 visible = elem.is_displayed()
                 enabled = elem.is_enabled() if tag in ['button', 'input', 'a'] else 'N/A'
-                # print(f"  Elemento {i+1}: tag='{tag}', data-toggle='{data_toggle}', text='{text}', visible={visible}, enabled={enabled}", flush=True)
 
             # Otros atributos relacionados con descarga
             download_related = driver.find_elements(By.XPATH, "//*[@download or @href[contains(., 'excel') or @href[contains(., 'download')]]")
-            # print(f"DEBUG: Encontrados {len(download_related)} elementos con atributos de descarga:", flush=True)
             for i, elem in enumerate(download_related):
                 tag = elem.tag_name
                 href = elem.get_attribute("href") or ""
                 download = elem.get_attribute("download") or ""
                 text = elem.text.strip()
-                # print(f"  Elemento {i+1}: tag='{tag}', href='{href}', download='{download}', text='{text}'", flush=True)
         except Exception as e:
             pass
-            # print(f"DEBUG: Error al inspeccionar elementos con data-toggle: {e}", flush=True)
 
         page_num = 1
         while True:
-            print(f"\nRecolectando datos de tabla en página {page_num}...", flush=True)
+            logger.info(f"Recolectando datos de tabla en página {page_num}...")
             row_selector = "//tr[contains(@class, 'ng-star-inserted')]"
             try:
                 WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, row_selector)))
                 rows = driver.find_elements(By.XPATH, row_selector)
-                print(f"Encontradas {len(rows)} filas en la página {page_num}.", flush=True)
+                logger.debug(f"Encontradas {len(rows)} filas en la página {page_num}.")
 
                 # Extraer todos los datos de cada fila usando índices
                 for row in rows:
@@ -1125,10 +1046,10 @@ def sondear_siniestros_liquidacion(driver, compania):
                             }
                             yield row_data
 
-                print(f"Datos de {len(rows)} filas guardados.", flush=True)
+                logger.debug(f"Datos de {len(rows)} filas guardados.")
 
             except TimeoutException:
-                print("No se encontraron más filas de 'Liquidación' en esta página. Finalizando recolección.", flush=True)
+                logger.info("No se encontraron más filas de 'Liquidación' en esta página. Finalizando recolección.")
                 break
 
             # Paginación
@@ -1141,7 +1062,7 @@ def sondear_siniestros_liquidacion(driver, compania):
                         if len(cells) > 1:
                             first_row_id_before_pagination = cells[1].text  # NumeroSiniestro is at index 1
                     except NoSuchElementException:
-                        print("WARN: Could not get first row ID for pagination check.", flush=True)
+                        logger.warning("Could not get first row ID for pagination check.")
 
                 next_button_selector = "button.p-paginator-next.p-paginator-element.p-link:not([disabled])"
                 next_button = driver.find_element(By.CSS_SELECTOR, next_button_selector)
@@ -1161,42 +1082,42 @@ def sondear_siniestros_liquidacion(driver, compania):
                     if len(cells_after) > 1:
                         first_row_id_after_pagination = cells_after[1].text
                         if first_row_id_before_pagination == first_row_id_after_pagination:
-                            print("Detectado bucle de paginación: La primera fila no cambió. Fin de la recolección.", flush=True)
+                            logger.info("Detectado bucle de paginación: La primera fila no cambió. Fin de la recolección.")
                             break # Break if we are stuck on the same page content
                 elif not rows_after_pagination: # If no rows are found on the new page, it's the end
-                    print("No se encontraron filas en la nueva página. Fin de la recolección.", flush=True)
+                    logger.info("No se encontraron filas en la nueva página. Fin de la recolección.")
                     break
 
             except (NoSuchElementException, TimeoutException):
-                print("No hay más páginas o el botón de siguiente está deshabilitado. Fin de la recolección.", flush=True)
+                logger.info("No hay más páginas o el botón de siguiente está deshabilitado. Fin de la recolección.")
                 break
 
     except Exception as e:
-        print(f"Error en sondear_siniestros_liquidacion: {e}")
+        logger.error(f"Error en sondear_siniestros_liquidacion: {e}")
         traceback.print_exc()
         take_screenshot(driver, "error_liquidacion.png")
 
-    print(f"\n--- Proceso de sondeo de liquidación completado. ---", flush=True)
-    print(f"\n--- Proceso de sondeo completado. ---", flush=True)
+    logger.info("Proceso de sondeo de liquidación completado.")
+    logger.info("Proceso de sondeo completado.")
 
 def scrape_full_data(driver):
     """
     Orquesta el proceso completo de scraping para todas las compañías definidas.
     """
-    print("--- Iniciando proceso de scraping completo ---", flush=True)
+    logger.info("Iniciando proceso de scraping completo")
 
     companias = ["BCI", "ZENIT"]
     all_data = []
 
     for compania in companias:
-        print(f"\n--- Procesando compañía: {compania.upper()} ---", flush=True)
+        logger.info(f"Procesando compañía: {compania.upper()}")
         if asegurar_contexto(driver, compania):
             data = list(sondear_siniestros_asignados(driver, compania))
             all_data.extend(data)
             data = list(sondear_siniestros_liquidacion(driver, compania))
             all_data.extend(data)
         else:
-            print(f"ADVERTENCIA: No se pudo asegurar el contexto para {compania.upper()}. Saltando esta compañía.", flush=True)
+            logger.warning(f"No se pudo asegurar el contexto para {compania.upper()}. Saltando esta compañía.")
             take_screenshot(driver, f"error_contexto_{compania.lower()}.png")
 
     all_data = list({item['NumeroSiniestro']: item for item in all_data}.values())
