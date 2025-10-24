@@ -1,0 +1,14 @@
+selenium
+notion-client
+python-dotenv
+webdriver-manager
+beautifulsoup4
+Flask
+gunicorn
+
+2captcha-python
+selenium-stealth
+tzdata
+pdfplumber
+pandas>=1.3.0
+openpyxl>=3.0.0
